@@ -1,0 +1,16 @@
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-latest
+    container_name: orderflow-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: EnterpriseDeveloper
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    ports:
+      - "14333:1433"
+    volumes:
+      - sql_data:/var/opt/mssql
+      - ./data/sample:/data/sample:ro
+
+volumes:
+  sql_data:
