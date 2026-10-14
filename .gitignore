@@ -1,0 +1,10 @@
+.env
+data/olist/
+bin/
+obj/
+.vs/
+*.user
+*.dtproj.user
+*.dacpac
+__pycache__/
+.venv/
