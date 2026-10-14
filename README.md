@@ -342,7 +342,7 @@ Create `src/OrderFlow.Database/OrderFlow.Database.sqlproj`:
 </Project>
 ```
 
-`Sql170` is the SQL Server 2025 target. The SDK compiles every `.sql` file except the post-deploy script.
+`Sql170` is the SQL Server 2025 target. The SDK compiles every `.sql` file except the post-deploy script. `<Name>OrderFlowDW</Name>` is the database name inside the package. The file on disk follows the project filename: `OrderFlow.Database.dacpac`.
 
 Create one file per schema under `src/OrderFlow.Database/Security/`:
 
@@ -371,15 +371,13 @@ Build and publish:
 ```bash
 dotnet build src/OrderFlow.Database/OrderFlow.Database.sqlproj
 sqlpackage /Action:Publish \
-  /SourceFile:src/OrderFlow.Database/bin/Debug/OrderFlowDW.dacpac \
+  /SourceFile:src/OrderFlow.Database/bin/Debug/OrderFlow.Database.dacpac \
   /TargetServerName:localhost,14333 \
   /TargetDatabaseName:OrderFlowDW \
   /TargetUser:sa \
   /TargetPassword:"$MSSQL_SA_PASSWORD" \
   /TargetTrustServerCertificate:True
 ```
-
-If the dacpac path differs, use the path `dotnet build` printed.
 
 Check:
 
@@ -778,7 +776,7 @@ jobs:
       - name: Publish to the CI instance
         run: >
           sqlpackage /Action:Publish
-          /SourceFile:src/OrderFlow.Database/bin/Release/OrderFlowDW.dacpac
+          /SourceFile:src/OrderFlow.Database/bin/Release/OrderFlow.Database.dacpac
           /TargetServerName:localhost
           /TargetDatabaseName:OrderFlowDW
           /TargetUser:sa
