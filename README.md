@@ -350,7 +350,7 @@ Create one file per schema under `src/OrderFlow.Database/Security/`:
 CREATE SCHEMA stg AUTHORIZATION dbo;
 ```
 
-Repeat for `dw`, `dq`, `audit`, `etl`, and `rpt`.
+Repeat for `dw`, `dq`, `audit`, `etl`, and `rpt`. Each file has to contain that statement. An empty file does not create the schema. Build error `SQL71501`, unresolved reference to a schema, means the matching file under `Security/` is missing or empty.
 
 Create `src/OrderFlow.Database/Scripts/Script.PostDeployment.sql`:
 
@@ -378,6 +378,8 @@ sqlpackage /Action:Publish \
   /TargetPassword:"$MSSQL_SA_PASSWORD" \
   /TargetTrustServerCertificate:True
 ```
+
+Publish only after the build prints `Build succeeded`. A failed build leaves the previous `.dacpac` on disk. SqlPackage publishes that older file and still prints `Successfully published`. The database then does not contain the objects from the failed build.
 
 Check:
 
@@ -410,20 +412,22 @@ Add `src/OrderFlow.Database/audit/Tables/LoadRun.sql` with:
 | `RowsStaged` | `int`, null until success |
 | `ErrorMessage` | `nvarchar(4000)`, null unless the load fails |
 
-Add three procedures in `etl`. Later loads, including SSIS, call these and do not insert into `audit.LoadRun` directly.
+Add three procedures under `src/OrderFlow.Database/etl/Stored Procedures/`. Later loads, including SSIS, call these and do not insert into `audit.LoadRun` directly.
 
 | Procedure | Behavior |
 | --- | --- |
-| `etl.StartLoad @LoadName, @SourceFile` | Inserts a `Running` row and returns `LoadRunId` |
-| `etl.CompleteLoad @LoadRunId, @RowsStaged` | Sets `Succeeded`, `EndedAt`, and the row count |
+| `etl.StartLoad @LoadName, @SourceFile, @LoadRunId int OUTPUT` | Inserts a `Running` row and returns the new id in `@LoadRunId` |
+| `etl.CompleteLoad @LoadRunId, @RowsStaged` | Sets `Succeeded`, `EndedAt`, and the row count. Clears `ErrorMessage` |
 | `etl.FailLoad @LoadRunId, @ErrorMessage` | Sets `Failed`, `EndedAt`, and the message |
 
-Publish again. Call `etl.StartLoad` and `etl.CompleteLoad` once by hand and read the row back.
+Build again and publish with the same SqlPackage command as Step 4. Publish only after `Build succeeded`. Then call the procedures by hand: one `StartLoad` plus `CompleteLoad`, and a second `StartLoad` plus `FailLoad`. If `sqlcmd` reports that a procedure or `audit.LoadRun` does not exist, the database still has the previous package.
 
 **Done when:** one manual call leaves a single `Succeeded` row, and a call to `etl.FailLoad` leaves a `Failed` row with the message.
 
+`Security/audit.sql` and `Security/etl.sql` were empty in the Step 4 commit. This step fills in their `CREATE SCHEMA` statements, so they belong in this commit too. The README changes for this step do as well. `Security/dw.sql`, `Security/dq.sql`, and `Security/rpt.sql` are unchanged, so leave them out.
+
 ```bash
-git add src/OrderFlow.Database/audit src/OrderFlow.Database/etl
+git add src/OrderFlow.Database/audit src/OrderFlow.Database/etl src/OrderFlow.Database/Security/audit.sql src/OrderFlow.Database/Security/etl.sql
 ```
 
 **Commit:** `Record load start, success, and failure in one place.`
@@ -889,6 +893,8 @@ git add README.md docs
 | Port already in use | Something is bound to 14333. Stop that process, or change the host port on the left side of `14333:1433` |
 | `BULK INSERT` cannot see the file | The path is the path inside the container, `/data/sample/...`. Recreate the container after adding the volume |
 | Publish says the target platform is unsupported | The container is not SQL Server 2025, or `MSSQL_PID` fell back to an edition that cannot host the database. `SELECT @@VERSION` and confirm `EnterpriseDeveloper` |
+| Build error `SQL71501`, unresolved schema | The object is fine. `Security/<schema>.sql` is missing or empty, so the project has no `CREATE SCHEMA` for it |
+| `Could not find stored procedure`, or invalid object name, after a publish that said it succeeded | The build failed and SqlPackage published the previous `.dacpac`. Rebuild, wait for `Build succeeded`, then publish again |
 | GitHub Actions stays empty | Step 17 has not been pushed, or Actions are disabled on the repository |
 | A push did not start CI | The workflow file is not on that branch, or the push was not to `main` and was not a pull request |
 
