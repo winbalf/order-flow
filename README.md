@@ -440,7 +440,7 @@ Copy only this file into Git:
 
 `data/sample/product_category_name_translation.csv`
 
-It has about 70 rows and two columns: `product_category_name`, `product_category_name_english`.
+It has about 71 rows and two columns: `product_category_name`, `product_category_name_english`.
 
 Create `stg.ProductCategory`. Both columns are `nvarchar`, plus `LoadRunId int not null`. Staging keeps the file text. Types are applied when the warehouse is loaded.
 

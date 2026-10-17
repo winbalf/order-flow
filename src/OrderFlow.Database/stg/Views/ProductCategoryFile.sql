@@ -1,0 +1,4 @@
+CREATE VIEW stg.ProductCategoryFile
+AS
+SELECT product_category_name, product_category_name_english
+FROM stg.ProductCategory;
