@@ -21,18 +21,20 @@ BEGIN
             FROM ' + QUOTENAME(@SourceFile, '''') + N'
             WITH (
                 FORMAT = ''CSV'',
-                FIRSTROW = 2,
-                CODEPAGE = ''65001''
+                FIRSTROW = 2
             );';
+
+        DELETE FROM stg.ProductCategoryFile;
+
+        EXEC sys.sp_executesql @BulkSql;
 
         BEGIN TRANSACTION;
 
         DELETE FROM stg.ProductCategory;
 
-        EXEC sys.sp_executesql @BulkSql;
-
-        UPDATE stg.ProductCategory
-        SET LoadRunId = @LoadRunId;
+        INSERT INTO stg.ProductCategory (product_category_name, product_category_name_english, LoadRunId)
+        SELECT product_category_name, product_category_name_english, @LoadRunId
+        FROM stg.ProductCategoryFile;
 
         SET @RowsStaged = @@ROWCOUNT;
 

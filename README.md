@@ -173,13 +173,13 @@ Step 20 adds this to the top of the README, after the default branch has one gre
 
 ## Progress
 
-- [ ] Step 1. Put this guide on GitHub
-- [ ] Step 2. Keep secrets and the full dataset out of Git
-- [ ] Step 3. Run SQL Server 2025 in Docker
-- [ ] Step 4. Add the database project and the six schemas
-- [ ] Step 5. Record loads in `audit.LoadRun`
-- [ ] Step 6. Load the category translation file
-- [ ] Step 7. Load the other eight Olist files
+- [x] Step 1. Put this guide on GitHub
+- [x] Step 2. Keep secrets and the full dataset out of Git
+- [x] Step 3. Run SQL Server 2025 in Docker
+- [x] Step 4. Add the database project and the six schemas
+- [x] Step 5. Record loads in `audit.LoadRun`
+- [x] Step 6. Load the category translation file
+- [x] Step 7. Load the other eight Olist files
 - [ ] Step 8. Write down the star schema
 - [ ] Step 9. Create the dimension and fact tables
 - [ ] Step 10. Load the dimensions and facts
@@ -293,15 +293,16 @@ services:
     volumes:
       - sql_data:/var/opt/mssql
       - ./data/sample:/data/sample:ro
+      - ./data/olist:/data/olist:ro
 
 volumes:
   sql_data:
 ```
 
-Port 14333 leaves the Windows SQL Server instance on 1433 alone. `EnterpriseDeveloper` is the free Developer edition, so the container does not expire after 180 days.
+Port 14333 leaves the Windows SQL Server instance on 1433 alone. `EnterpriseDeveloper` is the free Developer edition, so the container does not expire after 180 days. `data/olist` is the full Kaggle download. The folder can be empty until Step 7. The read-only mode is `:ro`.
 
 ```bash
-mkdir -p data/sample
+mkdir -p data/sample data/olist
 docker compose up -d
 ```
 
@@ -440,20 +441,24 @@ Copy only this file into Git:
 
 `data/sample/product_category_name_translation.csv`
 
-It has about 71 rows and two columns: `product_category_name`, `product_category_name_english`.
+It has 71 data rows and two columns: `product_category_name`, `product_category_name_english`.
 
-Create `stg.ProductCategory`. Both columns are `nvarchar`, plus `LoadRunId int not null`. Staging keeps the file text. Types are applied when the warehouse is loaded.
+Create `stg.ProductCategory`. Both text columns are `nvarchar`, plus `LoadRunId int not null`. Staging keeps the file text. Types are applied when the warehouse is loaded.
+
+Create `stg.ProductCategoryFile` with only those two CSV columns, each `nvarchar(4000)`. `BULK INSERT` loads this table. The procedure then copies the rows into `stg.ProductCategory` and sets `LoadRunId`.
+
+On this Linux image, `FORMAT = 'CSV'` raises `Msg 7301` from the BULK provider when the target is a view, includes `LoadRunId`, or uses `nvarchar(max)`. It raises the same error when the statement runs inside an explicit transaction. `CODEPAGE` is not supported on Linux (`Msg 16202`). Leave it out. The container reads the file as UTF-8.
 
 Create `etl.LoadProductCategory`. It should:
 
-1. Call `etl.StartLoad` with load name `stg.ProductCategory` and the source file name.
-2. Delete existing rows from `stg.ProductCategory`.
-3. `BULK INSERT` from `/data/sample/product_category_name_translation.csv` using `FORMAT = 'CSV'`, `FIRSTROW = 2`, and `CODEPAGE = '65001'`.
-4. Set `LoadRunId` on the inserted rows.
-5. Call `etl.CompleteLoad` with the inserted count.
-6. On any error, call `etl.FailLoad` and rethrow.
+1. Call `etl.StartLoad` with load name `stg.ProductCategory` and the source file path.
+2. Delete existing rows from `stg.ProductCategoryFile`.
+3. `BULK INSERT` into that file table from `/data/sample/product_category_name_translation.csv` with `FORMAT = 'CSV'` and `FIRSTROW = 2`. The path has to be a string literal, so build the statement as dynamic SQL and run it with `sp_executesql`. Keep this statement outside the transaction.
+4. In a transaction, delete `stg.ProductCategory` and insert the file-table rows with the new `LoadRunId`.
+5. After commit, call `etl.CompleteLoad` with the inserted count.
+6. On any error, roll back an open transaction, copy `ERROR_MESSAGE()` into a variable, call `etl.FailLoad`, and rethrow. A procedure argument cannot be `ERROR_MESSAGE()` itself.
 
-`FORMAT = 'CSV'` is the load style the other files will reuse. It respects quotes, which the review file will need.
+`FORMAT = 'CSV'` is the load style the other files reuse. It respects quotes. A quoted field that also contains a line break still fails on this image. Step 7 flattens the reviews file for that reason. A later success does not change an earlier `Failed` row in `audit.LoadRun`.
 
 The container sees the file at `/data/sample/...` because of the volume in Step 3. Rebuild the container mount if you created `data/sample` after the first `docker compose up`:
 
@@ -480,9 +485,9 @@ git add data/sample/product_category_name_translation.csv src/OrderFlow.Database
 
 ## Step 7. Load the other eight Olist files
 
-Keep the full CSVs in `data/olist/`. Do not `git add` that folder.
+Keep the full CSVs in `data/olist/`. Do not `git add` that folder. The container reads them at `/data/olist/...`. If that volume was added after the first `docker compose up`, run `docker compose up -d` before the load.
 
-Create one `stg` table and one `etl.Load*` procedure per file, copied from the Step 6 pattern. Column names match the header, including the source spellings `product_name_lenght` and `product_description_lenght`. Every data column is `nvarchar`. Each table has `LoadRunId`.
+Create one `stg` table, one `*File` table, and one `etl.Load*` procedure per file, copied from the Step 6 pattern. Column names match the header, including the source spellings `product_name_lenght` and `product_description_lenght`. Every data column on the `stg` table is `nvarchar`, plus `LoadRunId`. Every column on the file table is `nvarchar(4000)`, with no `LoadRunId`. The bulk insert targets the file table and stays outside the transaction.
 
 | File | Table | Procedure |
 | --- | --- | --- |
@@ -497,12 +502,28 @@ Create one `stg` table and one `etl.Load*` procedure per file, copied from the S
 
 Staging tables have no business primary key. Geolocation repeats ZIP prefixes, and those duplicates stay.
 
-Add `etl.LoadAllStaging` that calls the eight procedures plus `etl.LoadProductCategory`.
-
-**Done when:** `etl.LoadAllStaging` finishes with one new `Succeeded` audit row per table, and `COUNT(*)` in each `stg` table matches the data rows in that CSV. Run it twice and confirm the staged counts do not double.
+`olist_order_reviews_dataset.csv` has commas and line breaks inside quoted comments. `FORMAT = 'CSV'` accepts the commas and raises `Msg 7301` on the line breaks. Write `data/olist/olist_order_reviews_oneline.csv` with each embedded line break replaced by a space, and point `etl.LoadOrderReviews` at `/data/olist/olist_order_reviews_oneline.csv`. Keep the original file. Both stay gitignored.
 
 ```bash
-git add src/OrderFlow.Database
+python3 - << 'PY'
+import csv
+from pathlib import Path
+src = Path("data/olist/olist_order_reviews_dataset.csv")
+dst = Path("data/olist/olist_order_reviews_oneline.csv")
+with src.open(newline="", encoding="utf-8") as fin, dst.open("w", encoding="utf-8", newline="\n") as fout:
+    reader = csv.reader(fin)
+    writer = csv.writer(fout, lineterminator="\n")
+    for row in reader:
+        writer.writerow([col.replace("\r\n", " ").replace("\n", " ").replace("\r", " ") for col in row])
+PY
+```
+
+Add `etl.LoadAllStaging` that calls the eight procedures plus `etl.LoadProductCategory`. It stops at the first error, so tables later in the procedure get no audit row for that attempt.
+
+**Done when:** `etl.LoadAllStaging` finishes with one new `Succeeded` audit row per table, and `COUNT(*)` in each `stg` table matches the data rows in that CSV. For this download those counts are 71, 99441, 1000163, 112650, 103886, 99224, 99441, 32951, and 3095. Run it twice and confirm the staged counts do not double.
+
+```bash
+git add src/OrderFlow.Database README.md
 ```
 
 **Commit:** `Land every Olist file in staging through the same audited load.`
@@ -891,7 +912,10 @@ git add README.md docs
 | --- | --- |
 | Container exits immediately | Read `docker compose logs sqlserver`. Weak password, less than 2 GB of memory, or a CPU without AVX are the usual causes. SQL Server 2025 containers need AVX |
 | Port already in use | Something is bound to 14333. Stop that process, or change the host port on the left side of `14333:1433` |
-| `BULK INSERT` cannot see the file | The path is the path inside the container, `/data/sample/...`. Recreate the container after adding the volume |
+| `BULK INSERT` cannot see the file | The path is the path inside the container, `/data/sample/...` or `/data/olist/...`. Recreate the container after adding the volume. The read-only mode is `:ro` |
+| `Msg 16202`, `CODEPAGE` is not supported on Linux | Remove `CODEPAGE`. This container reads the file as UTF-8 |
+| `Msg 7301` from provider `BULK` | `FORMAT = 'CSV'` is inside a transaction, or the target is a view, uses `nvarchar(max)`, or includes `LoadRunId`. Bulk-insert a file table of `nvarchar(4000)` columns before `BEGIN TRANSACTION`. For reviews, a line break inside a quoted field causes the same error. Load `olist_order_reviews_oneline.csv` |
+| Publish stops because a `*File` name already exists | A view with that name is still in the database. Drop the view, then publish again |
 | Publish says the target platform is unsupported | The container is not SQL Server 2025, or `MSSQL_PID` fell back to an edition that cannot host the database. `SELECT @@VERSION` and confirm `EnterpriseDeveloper` |
 | Build error `SQL71501`, unresolved schema | The object is fine. `Security/<schema>.sql` is missing or empty, so the project has no `CREATE SCHEMA` for it |
 | `Could not find stored procedure`, or invalid object name, after a publish that said it succeeded | The build failed and SqlPackage published the previous `.dacpac`. Rebuild, wait for `Build succeeded`, then publish again |

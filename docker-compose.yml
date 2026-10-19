@@ -11,6 +11,7 @@ services:
     volumes:
       - sql_data:/var/opt/mssql
       - ./data/sample:/data/sample:ro
+      - ./data/olist:/data/olist:ro
 
 volumes:
   sql_data:
