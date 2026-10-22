@@ -180,7 +180,7 @@ Step 20 adds this to the top of the README, after the default branch has one gre
 - [x] Step 5. Record loads in `audit.LoadRun`
 - [x] Step 6. Load the category translation file
 - [x] Step 7. Load the other eight Olist files
-- [ ] Step 8. Write down the star schema
+- [x] Step 8. Write down the star schema
 - [ ] Step 9. Create the dimension and fact tables
 - [ ] Step 10. Load the dimensions and facts
 - [ ] Step 11. Simulate SCD2 customer history
