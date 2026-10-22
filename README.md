@@ -181,7 +181,7 @@ Step 20 adds this to the top of the README, after the default branch has one gre
 - [x] Step 6. Load the category translation file
 - [x] Step 7. Load the other eight Olist files
 - [x] Step 8. Write down the star schema
-- [ ] Step 9. Create the dimension and fact tables
+- [x] Step 9. Create the dimension and fact tables
 - [ ] Step 10. Load the dimensions and facts
 - [ ] Step 11. Simulate SCD2 customer history
 - [ ] Step 12. Add the tSQLt suite
@@ -234,7 +234,13 @@ git push -u origin main
 
 If `order-flow` is already taken on your account, pick another name and use it in the badge later.
 
-Open the repo in the browser. Confirm the Actions tab loads. Leave it empty until Step 17.
+**Check:**
+
+```bash
+gh repo view --json name,visibility,url
+```
+
+`visibility` is `PUBLIC`. Open `url` and confirm this README is the file on `main`. The Actions tab loads and stays empty until Step 17.
 
 **Commit:** `Document the build sequence for OrderFlow DW.`
 
@@ -262,6 +268,15 @@ MSSQL_SA_PASSWORD=ChangeMe_Now1!
 ```
 
 Copy it to `.env` and replace the password with one you will actually use. `.env` stays on this machine.
+
+**Check:**
+
+```bash
+git check-ignore -v .env data/olist
+git status
+```
+
+`git check-ignore` prints a `.gitignore` rule for `.env` and for `data/olist`. Before the commit, `git status` lists `.gitignore` and `.env.example` and leaves `.env` out. After the commit, `git status` is clean.
 
 **Done when:** `git status` lists `.gitignore` and `.env.example`, and does not list `.env`.
 
@@ -421,7 +436,39 @@ Add three procedures under `src/OrderFlow.Database/etl/Stored Procedures/`. Late
 | `etl.CompleteLoad @LoadRunId, @RowsStaged` | Sets `Succeeded`, `EndedAt`, and the row count. Clears `ErrorMessage` |
 | `etl.FailLoad @LoadRunId, @ErrorMessage` | Sets `Failed`, `EndedAt`, and the message |
 
-Build again and publish with the same SqlPackage command as Step 4. Publish only after `Build succeeded`. Then call the procedures by hand: one `StartLoad` plus `CompleteLoad`, and a second `StartLoad` plus `FailLoad`. If `sqlcmd` reports that a procedure or `audit.LoadRun` does not exist, the database still has the previous package.
+Build again and publish with the same SqlPackage command as Step 4. Publish only after `Build succeeded`. If `sqlcmd` reports that a procedure or `audit.LoadRun` does not exist, the database still has the previous package.
+
+**Check:**
+
+Load the password if this shell does not have it (`set -a && source .env && set +a`).
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+DECLARE @Ok int, @Bad int;
+
+EXEC etl.StartLoad
+    @LoadName = N'stg.ManualCheck',
+    @SourceFile = N'manual',
+    @LoadRunId = @Ok OUTPUT;
+EXEC etl.CompleteLoad @LoadRunId = @Ok, @RowsStaged = 1;
+
+EXEC etl.StartLoad
+    @LoadName = N'stg.ManualCheck',
+    @SourceFile = N'manual-fail',
+    @LoadRunId = @Bad OUTPUT;
+EXEC etl.FailLoad @LoadRunId = @Bad, @ErrorMessage = N'manual failure';
+
+SELECT LoadRunId, LoadName, Status, RowsStaged, ErrorMessage
+FROM audit.LoadRun
+WHERE LoadRunId IN (@Ok, @Bad)
+ORDER BY LoadRunId;
+SQL
+)"
+```
+
+The first row is `Succeeded`, `RowsStaged` is 1, and `ErrorMessage` is null. The second row is `Failed` and `ErrorMessage` is `manual failure`.
 
 **Done when:** one manual call leaves a single `Succeeded` row, and a call to `etl.FailLoad` leaves a `Failed` row with the message.
 
@@ -466,7 +513,56 @@ The container sees the file at `/data/sample/...` because of the volume in Step 
 docker compose up -d
 ```
 
-Publish, run `EXEC etl.LoadProductCategory`, then run it a second time.
+Publish with the Step 4 command after `Build succeeded`.
+
+**Check:**
+
+Load the password if this shell does not have it (`set -a && source .env && set +a`).
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+EXEC etl.LoadProductCategory;
+EXEC etl.LoadProductCategory;
+
+SELECT COUNT(*) AS StagedRows FROM stg.ProductCategory;
+
+SELECT TOP (2) LoadRunId, Status, RowsStaged
+FROM audit.LoadRun
+WHERE LoadName = N'stg.ProductCategory'
+ORDER BY LoadRunId DESC;
+SQL
+)"
+```
+
+`StagedRows` is 71. Both audit rows are `Succeeded` and `RowsStaged` is 71.
+
+A missing file must fail the load and leave the staged rows in place:
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "EXEC etl.LoadProductCategory @SourceFile = N'/data/sample/does-not-exist.csv';"
+```
+
+That command stops with the bulk-insert error. Then confirm the failure was recorded and the staged table was kept:
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+SELECT TOP (1) Status, RowsStaged, ErrorMessage
+FROM audit.LoadRun
+WHERE LoadName = N'stg.ProductCategory'
+ORDER BY LoadRunId DESC;
+
+SELECT COUNT(*) AS StagedRows FROM stg.ProductCategory;
+SQL
+)"
+```
+
+The newest audit row is `Failed`, `ErrorMessage` is filled in, and `StagedRows` is still 71.
 
 **Done when:**
 
@@ -520,6 +616,46 @@ PY
 
 Add `etl.LoadAllStaging` that calls the eight procedures plus `etl.LoadProductCategory`. It stops at the first error, so tables later in the procedure get no audit row for that attempt.
 
+Publish with the Step 4 command after `Build succeeded`.
+
+**Check:**
+
+Load the password if this shell does not have it (`set -a && source .env && set +a`). Run the load twice. The geolocation file is about a million rows, so each run takes a few minutes.
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "EXEC etl.LoadAllStaging; EXEC etl.LoadAllStaging;"
+```
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+SELECT 'stg.ProductCategory' AS TableName, COUNT(*) AS StagedRows FROM stg.ProductCategory
+UNION ALL SELECT 'stg.Customers', COUNT(*) FROM stg.Customers
+UNION ALL SELECT 'stg.Geolocation', COUNT(*) FROM stg.Geolocation
+UNION ALL SELECT 'stg.OrderItems', COUNT(*) FROM stg.OrderItems
+UNION ALL SELECT 'stg.OrderPayments', COUNT(*) FROM stg.OrderPayments
+UNION ALL SELECT 'stg.OrderReviews', COUNT(*) FROM stg.OrderReviews
+UNION ALL SELECT 'stg.Orders', COUNT(*) FROM stg.Orders
+UNION ALL SELECT 'stg.Products', COUNT(*) FROM stg.Products
+UNION ALL SELECT 'stg.Sellers', COUNT(*) FROM stg.Sellers;
+
+SELECT LoadName, Status, RowsStaged
+FROM audit.LoadRun AS r
+WHERE LoadRunId = (
+    SELECT MAX(LoadRunId)
+    FROM audit.LoadRun
+    WHERE LoadName = r.LoadName
+)
+ORDER BY LoadName;
+SQL
+)"
+```
+
+The staged counts are 71, 99441, 1000163, 112650, 103886, 99224, 99441, 32951, and 3095, in the order of the first result. The second run leaves those counts unchanged. The latest audit row for each of the nine load names is `Succeeded`, and `RowsStaged` matches that table.
+
 **Done when:** `etl.LoadAllStaging` finishes with one new `Succeeded` audit row per table, and `COUNT(*)` in each `stg` table matches the data rows in that CSV. For this download those counts are 71, 99441, 1000163, 112650, 103886, 99224, 99441, 32951, and 3095. Run it twice and confirm the staged counts do not double.
 
 ```bash
@@ -539,6 +675,8 @@ Include the rules at the top of this README. Call out three Olist traps in your 
 - an order has five dates
 
 **Done when:** someone can build the tables from the document without guessing the grain.
+
+No command for this step. Read `docs/star-schema.md` and confirm each of the six tables states its grain, its business key, and its surrogate key.
 
 ```bash
 git add docs
@@ -563,7 +701,74 @@ Insert an unknown member with key `-1` in each dimension. `DimDate` can use `Dat
 
 Foreign keys point at the dimension surrogate keys. Date keys are foreign keys to `dw.DimDate`.
 
-Publish to the container.
+**Check:**
+
+Load the password if this shell does not have it (`set -a && source .env && set +a`). Publish only after the build prints `Build succeeded`.
+
+```bash
+dotnet build src/OrderFlow.Database/OrderFlow.Database.sqlproj
+sqlpackage /Action:Publish \
+  /SourceFile:src/OrderFlow.Database/bin/Debug/OrderFlow.Database.dacpac \
+  /TargetServerName:localhost,14333 \
+  /TargetDatabaseName:OrderFlowDW \
+  /TargetUser:sa \
+  /TargetPassword:"$MSSQL_SA_PASSWORD" \
+  /TargetTrustServerCertificate:True
+```
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+SELECT name
+FROM sys.tables
+WHERE schema_id = SCHEMA_ID('dw')
+ORDER BY name;
+
+SELECT 'DimDate' AS DimensionName, COUNT(*) AS UnknownRows FROM dw.DimDate WHERE DateKey = -1
+UNION ALL SELECT 'DimCustomer', COUNT(*) FROM dw.DimCustomer WHERE CustomerKey = -1
+UNION ALL SELECT 'DimProduct', COUNT(*) FROM dw.DimProduct WHERE ProductKey = -1
+UNION ALL SELECT 'DimSeller', COUNT(*) FROM dw.DimSeller WHERE SellerKey = -1;
+SQL
+)"
+```
+
+The table list is `DimCustomer`, `DimDate`, `DimProduct`, `DimSeller`, `FactOrderItem`, `FactPayment`. `UnknownRows` is 1 for each dimension.
+
+A key of `-1` is a real dimension row, so this insert commits nothing after the rollback. A key of `0` is missing, so the foreign key rejects it:
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+BEGIN TRANSACTION;
+INSERT INTO dw.FactOrderItem
+    (OrderId, OrderItemId, CustomerKey, ProductKey, SellerKey,
+     PurchaseDateKey, ApprovedDateKey, CarrierDateKey, DeliveredDateKey, EstimatedDateKey,
+     CustomerId, Price, FreightValue, OrderStatus)
+VALUES
+    (N'CHECK', 1, -1, -1, -1, -1, -1, -1, -1, -1, N'CHECK', 1.00, 1.00, N'check');
+ROLLBACK TRANSACTION;
+
+INSERT INTO dw.FactOrderItem
+    (OrderId, OrderItemId, CustomerKey, ProductKey, SellerKey,
+     PurchaseDateKey, ApprovedDateKey, CarrierDateKey, DeliveredDateKey, EstimatedDateKey,
+     CustomerId, Price, FreightValue, OrderStatus)
+VALUES
+    (N'CHECK', 1, 0, -1, -1, -1, -1, -1, -1, -1, N'CHECK', 1.00, 1.00, N'check');
+SQL
+)"
+```
+
+The second insert stops with `Msg 547` on `FK_FactOrderItem_Customer`. `dw.FactOrderItem` stays empty:
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "SELECT COUNT(*) AS FactRows FROM dw.FactOrderItem;"
+```
+
+`FactRows` is 0.
 
 **Done when:** the six tables exist, each dimension has its `-1` row, and a fact row with a missing dimension key cannot be inserted.
 

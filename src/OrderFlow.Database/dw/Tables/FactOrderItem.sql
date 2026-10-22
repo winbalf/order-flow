@@ -1,0 +1,26 @@
+CREATE TABLE dw.FactOrderItem
+(
+    OrderId nvarchar(32) NOT NULL,
+    OrderItemId int NOT NULL,
+    CustomerKey int NOT NULL,
+    ProductKey int NOT NULL,
+    SellerKey int NOT NULL,
+    PurchaseDateKey int NOT NULL,
+    ApprovedDateKey int NOT NULL,
+    CarrierDateKey int NOT NULL,
+    DeliveredDateKey int NOT NULL,
+    EstimatedDateKey int NOT NULL,
+    CustomerId nvarchar(32) NOT NULL,
+    Price decimal(18, 2) NOT NULL,
+    FreightValue decimal(18, 2) NOT NULL,
+    OrderStatus nvarchar(20) NOT NULL,
+    CONSTRAINT PK_FactOrderItem PRIMARY KEY CLUSTERED (OrderId, OrderItemId),
+    CONSTRAINT FK_FactOrderItem_Customer FOREIGN KEY (CustomerKey) REFERENCES dw.DimCustomer (CustomerKey),
+    CONSTRAINT FK_FactOrderItem_Product FOREIGN KEY (ProductKey) REFERENCES dw.DimProduct (ProductKey),
+    CONSTRAINT FK_FactOrderItem_Seller FOREIGN KEY (SellerKey) REFERENCES dw.DimSeller (SellerKey),
+    CONSTRAINT FK_FactOrderItem_PurchaseDate FOREIGN KEY (PurchaseDateKey) REFERENCES dw.DimDate (DateKey),
+    CONSTRAINT FK_FactOrderItem_ApprovedDate FOREIGN KEY (ApprovedDateKey) REFERENCES dw.DimDate (DateKey),
+    CONSTRAINT FK_FactOrderItem_CarrierDate FOREIGN KEY (CarrierDateKey) REFERENCES dw.DimDate (DateKey),
+    CONSTRAINT FK_FactOrderItem_DeliveredDate FOREIGN KEY (DeliveredDateKey) REFERENCES dw.DimDate (DateKey),
+    CONSTRAINT FK_FactOrderItem_EstimatedDate FOREIGN KEY (EstimatedDateKey) REFERENCES dw.DimDate (DateKey)
+);
