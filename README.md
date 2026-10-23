@@ -182,7 +182,7 @@ Step 20 adds this to the top of the README, after the default branch has one gre
 - [x] Step 7. Load the other eight Olist files
 - [x] Step 8. Write down the star schema
 - [x] Step 9. Create the dimension and fact tables
-- [ ] Step 10. Load the dimensions and facts
+- [x] Step 10. Load the dimensions and facts
 - [ ] Step 11. Simulate SCD2 customer history
 - [ ] Step 12. Add the tSQLt suite
 - [ ] Step 13. Load only new orders
@@ -787,19 +787,91 @@ Add these procedures. Each one is safe to run twice.
 | `etl.LoadDimDate` | Fills 2016–2018 if the days are missing |
 | `etl.LoadDimProduct` | SCD1 from `stg.Products` plus the English category. New products insert. Changed attributes update. Missing product ids are not invented here |
 | `etl.LoadDimSeller` | SCD1 from `stg.Sellers` |
-| `etl.LoadDimCustomer` | Current attributes only in this step. Step 11 adds history. Business key is `customer_unique_id` |
-| `etl.LoadFactOrderItem` | One warehouse row per staged item. Unknown customer, product, or seller uses `-1`. A missing date uses date key `-1` |
-| `etl.LoadFactPayment` | One warehouse row per staged payment |
-| `etl.LoadWarehouse` | Runs the dimension loads, then the two facts, inside a transaction |
+| `etl.LoadDimCustomer` | Current attributes only in this step. A changed city, state, or ZIP updates that row and leaves `ValidFrom`. Step 11 adds history. Business key is `customer_unique_id` |
+| `etl.LoadFactOrderItem` | One warehouse row per staged item the skip table keeps. Unknown customer, product, or seller uses `-1`. A missing or out-of-range date uses date key `-1`. A grain already loaded is left as it is |
+| `etl.LoadFactPayment` | One warehouse row per staged payment the skip table keeps. A grain already loaded is left as it is |
+| `etl.LoadWarehouse` | Runs `LoadDimDate`, `LoadDimProduct`, `LoadDimSeller`, `LoadDimCustomer`, then the two facts, inside one transaction |
 
-Use `TRY...CATCH` and `THROW`. Do the insert and update as separate statements so the behavior is easy to test. Compare that choice with `MERGE` in a short note in `docs/star-schema.md` when you have felt both.
+Use `TRY...CATCH` and `THROW`. Do the insert and update as separate statements so the behavior is easy to test. Compare that choice with `MERGE` in a short note in `docs/star-schema.md` when you have felt both. Each procedure opens a transaction only when it is not already inside one, so `etl.LoadWarehouse` can call it.
 
-Cast `nvarchar` staging values in these procedures. Leave bad casts for the data-quality step to count, and send the offending fact to the unknown member or skip it according to the rule you write down in `docs/star-schema.md`.
+Cast `nvarchar` staging values in these procedures. Leave bad casts for the data-quality step to count, and send the offending fact to the unknown member or skip it according to the skip table in `docs/star-schema.md`.
+
+Publish with the Step 4 command after `Build succeeded`. Staging from Step 7 has to already be loaded.
+
+**Check:**
+
+Load the password if this shell does not have it (`set -a && source .env && set +a`). Run the warehouse load twice. The first run fills the star. The second run must leave every count unchanged.
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+EXEC etl.LoadWarehouse;
+
+SELECT 'DimDate' AS TableName, COUNT(*) AS Rows FROM dw.DimDate
+UNION ALL SELECT 'DimCustomer', COUNT(*) FROM dw.DimCustomer
+UNION ALL SELECT 'DimProduct', COUNT(*) FROM dw.DimProduct
+UNION ALL SELECT 'DimSeller', COUNT(*) FROM dw.DimSeller
+UNION ALL SELECT 'FactOrderItem', COUNT(*) FROM dw.FactOrderItem
+UNION ALL SELECT 'FactPayment', COUNT(*) FROM dw.FactPayment;
+
+SELECT SUM(facts.Price) AS FactPrice
+FROM dw.FactOrderItem AS facts;
+
+SELECT SUM(TRY_CAST(items.price AS decimal(18, 2))) AS StagedPrice
+FROM stg.OrderItems AS items
+WHERE items.order_id IS NOT NULL
+  AND items.order_id <> N''
+  AND TRY_CAST(items.order_item_id AS int) IS NOT NULL
+  AND TRY_CAST(items.price AS decimal(18, 2)) IS NOT NULL
+  AND TRY_CAST(items.freight_value AS decimal(18, 2)) IS NOT NULL;
+
+EXEC etl.LoadWarehouse;
+
+SELECT 'DimDate' AS TableName, COUNT(*) AS Rows FROM dw.DimDate
+UNION ALL SELECT 'DimCustomer', COUNT(*) FROM dw.DimCustomer
+UNION ALL SELECT 'DimProduct', COUNT(*) FROM dw.DimProduct
+UNION ALL SELECT 'DimSeller', COUNT(*) FROM dw.DimSeller
+UNION ALL SELECT 'FactOrderItem', COUNT(*) FROM dw.FactOrderItem
+UNION ALL SELECT 'FactPayment', COUNT(*) FROM dw.FactPayment;
+SQL
+)"
+```
+
+On this download the first result is 1097, 96097, 32952, 3096, 112650, and 103886. Each dimension count includes its `-1` row. `FactPrice` equals `StagedPrice`. The result after the second `EXEC etl.LoadWarehouse` matches the first result.
+
+A staged item whose product id is absent lands on product key `-1`. Remove the probe afterwards so the fact stays the Olist snapshot:
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+INSERT INTO stg.OrderItems (order_id, order_item_id, product_id, seller_id, price, freight_value)
+VALUES (N'unknown-product-check', N'1', N'not-a-real-product', N'not-a-real-seller', N'10.00', N'1.00');
+
+EXEC etl.LoadFactOrderItem;
+
+SELECT ProductKey
+FROM dw.FactOrderItem
+WHERE OrderId = N'unknown-product-check'
+  AND OrderItemId = 1;
+
+DELETE FROM dw.FactOrderItem
+WHERE OrderId = N'unknown-product-check'
+  AND OrderItemId = 1;
+
+DELETE FROM stg.OrderItems
+WHERE order_id = N'unknown-product-check';
+SQL
+)"
+```
+
+`ProductKey` is `-1`.
 
 **Done when:** `etl.LoadWarehouse` loads the Olist snapshot, a second run does not change row counts, `SUM` of item price in the fact matches the staged items you chose to load, and an unknown product id lands on product key `-1`.
 
 ```bash
-git add src/OrderFlow.Database docs/star-schema.md
+git add src/OrderFlow.Database docs/star-schema.md README.md
 ```
 
 **Commit:** `Load the star schema so a second run does not duplicate rows.`
