@@ -1,6 +1,6 @@
 # Star schema
 
-`dw` is a sales and payments star. This file is the build contract for the tables and for the Step 10 load. A table is defined when its grain, its business key, and its surrogate key are fixed. Column lists below are the ones to create.
+`dw` is a sales and payments star. This file is the build contract for the tables, the Step 10 load, and the Step 11 customer history. A table is defined when its grain, its business key, and its surrogate key are fixed. Column lists below are the ones to create.
 
 ![OrderFlow star schema](star-schema.png)
 
@@ -36,7 +36,7 @@ These match the rules at the top of the README and stay fixed from this step on.
 
 Olist mints a new `customer_id` for every order. The same shopper returns under one `customer_unique_id`. The customer dimension therefore uses `CustomerUniqueId` as its business key. The fact keeps the order's `customer_id` in `CustomerId` so that one order can still be found. That column is not a foreign key, and it is not how the fact reaches `DimCustomer`.
 
-City, state, and ZIP live on the per-order customer row, so one person can show more than one address. The current dimension row takes the address from the latest `order_purchase_timestamp` for that `customer_unique_id`. When two orders share that timestamp, the greater `customer_id` wins. A `customer_unique_id` with no order still loads: use the greatest `customer_id` among its staging rows.
+City, state, and ZIP live on the per-order customer row, so one person can show more than one address. The current dimension row takes the address from the latest `order_purchase_timestamp` for that `customer_unique_id`. When two orders share that timestamp, the greater `customer_id` wins. A `customer_unique_id` with no order still loads: use the greatest `customer_id` among its staging rows. Step 11 then overlays `data/sample/customer_changes.csv` on that address for the people in the file.
 
 ### A payment is not an order item
 
@@ -72,7 +72,7 @@ An order has a set of items and, separately, a set of payments. `price` and `fre
 | Grain | One version of one person |
 | Surrogate key | `CustomerKey int` identity, primary key |
 | Business key | `CustomerUniqueId`. Unique where `IsCurrent = 1`. The same business key repeats once history exists. |
-| Change | SCD2 once Step 11 runs. Step 10 keeps one current row. A new `customer_unique_id` is inserted. A changed city, state, or ZIP updates that row and leaves `ValidFrom` at the first load. |
+| Change | SCD2. A new `customer_unique_id` inserts one current row. A changed city, state, or ZIP closes the current row and inserts a new current row. The same city, state, and ZIP do nothing. A second run of the same change file does nothing. |
 
 | Column | Type | Null | Notes |
 | --- | --- | --- | --- |
@@ -81,7 +81,7 @@ An order has a set of items and, separately, a set of payments. `price` and `fre
 | `ZipPrefix` | `nvarchar(8)` | yes | From `customer_zip_code_prefix`. |
 | `City` | `nvarchar(100)` | yes | From `customer_city`. |
 | `State` | `nvarchar(20)` | yes | From `customer_state`. Wide enough for the unknown label. |
-| `ValidFrom` | `datetime2(0)` | no | When this version became current. The first load uses the load timestamp. The Step 10 update of city, state, or ZIP does not change it. |
+| `ValidFrom` | `datetime2(0)` | no | When this version became current. The first load uses the load timestamp. A new version uses the timestamp captured when that version opens. |
 | `ValidTo` | `datetime2(0)` | yes | Null while the version is current. Set when the version is closed. |
 | `IsCurrent` | `bit` | no | `1` on the open version. |
 
@@ -93,7 +93,22 @@ The fact does not join to this table on `customer_id`. The path is:
 2. `stg.Orders.customer_id` to `stg.Customers.customer_id`
 3. `stg.Customers.customer_unique_id` to `dw.DimCustomer.CustomerUniqueId` where `IsCurrent = 1`
 
-The fact stores that row's `CustomerKey`. A later version of the person does not rewrite keys already stored on facts.
+The fact stores that row's `CustomerKey`. A later version of the person does not rewrite keys already stored on facts. After the synthetic batch, those facts still point at the closed version.
+
+## Synthetic customer history
+
+Olist is one snapshot, so customer history has to be made on purpose. `data/sample/customer_changes.csv` is synthetic. It is not an Olist file. Generate it with the script in [customer-changes.md](customer-changes.md). The batch holds 20 real `customer_unique_id` values taken from staging. Each of those rows replaces the staged address with city `scd2-city`, state `XX`, and ZIP prefix `00000`. Everyone else keeps the staged address.
+
+`etl.LoadDimCustomer` reads `/data/sample/customer_changes.csv` when the procedure is not already inside a transaction. It replaces `etl.CustomerChange`, builds one source row per person from `stg.Customers`, and overlays the synthetic city, state, and ZIP. A person who appears only on the change file is a new business key. `etl.LoadWarehouse` calls the procedure inside its transaction. Bulk insert cannot run there, so the warehouse load uses the rows already stored in `etl.CustomerChange` and does not read the CSV again. Staging is left as the Olist extract.
+
+| Source compared with the current row | What the procedure does |
+| --- | --- |
+| Same business key, and the city, state, or ZIP differs | Sets `IsCurrent = 0` and `ValidTo` on the current row, then inserts a new current row |
+| New business key | Inserts one current row |
+| Same business key, and the same city, state, and ZIP | Does nothing |
+| The same change file, run again | Does nothing. The open version already has those attributes, so no third version is inserted |
+
+`ValidTo` on the closed row and `ValidFrom` on the new row are the same timestamp, captured once for that run. The closed row keeps the address it had. The new row keeps the new `CustomerKey` from the identity. Facts loaded before the change keep the key they already stored.
 
 ## `dw.DimProduct`
 
@@ -255,4 +270,4 @@ Step 14 counts the bad casts. Until that step, the table above is the rule.
 
 ## Insert and update, compared with MERGE
 
-The warehouse procedures use a separate `UPDATE` for dimension rows already present and a separate `INSERT` for new business keys. A fact whose grain is already loaded is left unchanged. `MERGE` can do both in one statement, and it can also delete rows missing from the source. One statement hides which branch ran, and a `MERGE` with several `WHEN` clauses is harder to test one action at a time. The two statements make the second-run check obvious: the insert matches nothing, and the row counts stay put. The stand-ins for a null `customer_id`, `order_status`, or `payment_type` are in the skip table above.
+The warehouse procedures use a separate `UPDATE` and a separate `INSERT`. Product and seller overwrite the existing row. Customer history closes the current row in the `UPDATE`, then opens the new version in the `INSERT`. A fact whose grain is already loaded is left unchanged. `MERGE` can do both in one statement, and it can also delete rows missing from the source. One statement hides which branch ran, and a `MERGE` with several `WHEN` clauses is harder to test one action at a time. The two statements make the second-run check obvious: the insert matches nothing, and the row counts stay put. The stand-ins for a null `customer_id`, `order_status`, or `payment_type` are in the skip table above.

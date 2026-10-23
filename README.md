@@ -183,7 +183,7 @@ Step 20 adds this to the top of the README, after the default branch has one gre
 - [x] Step 8. Write down the star schema
 - [x] Step 9. Create the dimension and fact tables
 - [x] Step 10. Load the dimensions and facts
-- [ ] Step 11. Simulate SCD2 customer history
+- [x] Step 11. Simulate SCD2 customer history
 - [ ] Step 12. Add the tSQLt suite
 - [ ] Step 13. Load only new orders
 - [ ] Step 14. Stop the load on a critical data-quality failure
@@ -880,7 +880,7 @@ git add src/OrderFlow.Database docs/star-schema.md README.md
 
 Olist is one snapshot. History has to be made on purpose.
 
-Add `data/sample/customer_changes.csv` with about 20 real `customer_unique_id` values from staging and a changed city, state, or ZIP prefix. Say in `docs/star-schema.md` that this file is synthetic.
+Add `data/sample/customer_changes.csv` with about 20 real `customer_unique_id` values from staging and a changed city, state, or ZIP prefix. Say in `docs/star-schema.md` that this file is synthetic. The script that writes the file is in `docs/customer-changes.md`.
 
 Extend `etl.LoadDimCustomer`:
 
@@ -889,10 +889,122 @@ Extend `etl.LoadDimCustomer`:
 - Same business key and same attributes: do nothing
 - A second run of the same change file: do nothing
 
+The file for this step has 20 real `customer_unique_id` values and sets their city to `scd2-city`, their state to `XX`, and their ZIP prefix to `00000`. `etl.LoadDimCustomer` reads `/data/sample/customer_changes.csv` only when it is not already inside a transaction, stores those rows in `etl.CustomerChange`, and overlays them on the staged address. `etl.LoadWarehouse` calls that procedure inside its transaction, so it uses the rows already stored and does not read the file again.
+
+Publish with the Step 4 command after `Build succeeded`. The warehouse from Step 10 has to already be loaded, and the CSV has to exist before the first `EXEC etl.LoadDimCustomer`. The `data/sample` mount is already live, so a new file there does not need `docker compose up` again.
+
+**Check:**
+
+Load the password if this shell does not have it (`set -a && source .env && set +a`). Run this once, while `dw.DimCustomer` is still the Step 10 snapshot.
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+SELECT 'before' AS WhenRun, versions.VersionCount, COUNT(*) AS Customers
+FROM (
+    SELECT CustomerUniqueId, COUNT(*) AS VersionCount
+    FROM dw.DimCustomer
+    WHERE CustomerKey <> -1
+    GROUP BY CustomerUniqueId
+) AS versions
+GROUP BY versions.VersionCount
+ORDER BY versions.VersionCount;
+
+EXEC etl.LoadDimCustomer;
+EXEC etl.LoadDimCustomer;
+EXEC etl.LoadWarehouse;
+
+SELECT 'after' AS WhenRun, versions.VersionCount, COUNT(*) AS Customers
+FROM (
+    SELECT CustomerUniqueId, COUNT(*) AS VersionCount
+    FROM dw.DimCustomer
+    WHERE CustomerKey <> -1
+    GROUP BY CustomerUniqueId
+) AS versions
+GROUP BY versions.VersionCount
+ORDER BY versions.VersionCount;
+
+SELECT
+    SUM(CASE WHEN IsCurrent = 1 AND City = N'scd2-city' AND State = N'XX' AND ZipPrefix = N'00000' AND ValidTo IS NULL THEN 1 ELSE 0 END) AS OpenSyntheticRows,
+    SUM(CASE WHEN IsCurrent = 0 AND City <> N'scd2-city' AND ValidTo IS NOT NULL THEN 1 ELSE 0 END) AS ClosedOriginalRows
+FROM dw.DimCustomer
+WHERE CustomerUniqueId IN (
+    SELECT CustomerUniqueId
+    FROM dw.DimCustomer
+    WHERE City = N'scd2-city'
+      AND IsCurrent = 1
+);
+
+SELECT
+    SUM(CASE WHEN customers.IsCurrent = 0 THEN 1 ELSE 0 END) AS FactsOnClosedVersion,
+    SUM(CASE WHEN customers.IsCurrent = 1 THEN 1 ELSE 0 END) AS FactsOnCurrentVersion
+FROM dw.FactOrderItem AS facts
+INNER JOIN dw.DimCustomer AS customers
+    ON customers.CustomerKey = facts.CustomerKey
+WHERE customers.CustomerUniqueId IN (
+    SELECT CustomerUniqueId
+    FROM dw.DimCustomer
+    WHERE City = N'scd2-city'
+      AND IsCurrent = 1
+);
+
+SELECT 'DimDate' AS TableName, COUNT(*) AS Rows FROM dw.DimDate
+UNION ALL SELECT 'DimCustomer', COUNT(*) FROM dw.DimCustomer
+UNION ALL SELECT 'DimProduct', COUNT(*) FROM dw.DimProduct
+UNION ALL SELECT 'DimSeller', COUNT(*) FROM dw.DimSeller
+UNION ALL SELECT 'FactOrderItem', COUNT(*) FROM dw.FactOrderItem
+UNION ALL SELECT 'FactPayment', COUNT(*) FROM dw.FactPayment;
+SQL
+)"
+```
+
+Before the load, the histogram is one row: `VersionCount` 1 and `Customers` 96096. After the two customer loads and `etl.LoadWarehouse`, the histogram is `VersionCount` 1 with `Customers` 96076, and `VersionCount` 2 with `Customers` 20. `OpenSyntheticRows` is 20 and `ClosedOriginalRows` is 20. `FactsOnClosedVersion` is greater than 0 and `FactsOnCurrentVersion` is 0. The six table counts are 1097, 96117, 32952, 3096, 112650, and 103886.
+
+A business key that is not in staging yet gets one current row. The rollback removes that probe:
+
+```bash
+docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd \
+  -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -C -d OrderFlowDW \
+  -Q "$(cat <<'SQL'
+BEGIN TRANSACTION;
+
+INSERT INTO etl.CustomerChange
+    (customer_unique_id, customer_zip_code_prefix, customer_city, customer_state)
+VALUES
+    (N'new-person-check', N'11111', N'new-city', N'SP');
+
+EXEC etl.LoadDimCustomer;
+
+SELECT City, State, ZipPrefix, IsCurrent, ValidTo
+FROM dw.DimCustomer
+WHERE CustomerUniqueId = N'new-person-check';
+
+ROLLBACK TRANSACTION;
+
+SELECT COUNT(*) AS NewPersonRows
+FROM dw.DimCustomer
+WHERE CustomerUniqueId = N'new-person-check';
+
+SELECT versions.VersionCount, COUNT(*) AS Customers
+FROM (
+    SELECT CustomerUniqueId, COUNT(*) AS VersionCount
+    FROM dw.DimCustomer
+    WHERE CustomerKey <> -1
+    GROUP BY CustomerUniqueId
+) AS versions
+GROUP BY versions.VersionCount
+ORDER BY versions.VersionCount;
+SQL
+)"
+```
+
+The probe row has `City` `new-city`, `State` `SP`, `ZipPrefix` `11111`, `IsCurrent` 1, and `ValidTo` null. `NewPersonRows` is 0. The histogram is still 96076 customers with one version and 20 customers with two.
+
 **Done when:** those customers have two versions, everyone else has one, and running the procedure again does not add a third version.
 
 ```bash
-git add data/sample/customer_changes.csv src/OrderFlow.Database/etl docs/star-schema.md
+git add data/sample/customer_changes.csv src/OrderFlow.Database/etl docs/star-schema.md docs/customer-changes.md README.md
 ```
 
 **Commit:** `Simulate a customer change batch so SCD2 has history to show.`
